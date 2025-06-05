@@ -76,13 +76,13 @@ startupProbe:
   exec:
     command:
       - token-initializer
-  timeoutSeconds: 300
+  timeoutSeconds: 1000000
   initialDelaySeconds: 20
   periodSeconds: 20
-  failureThreshold: 1000000
+  failureThreshold: 1
 ```
 
-- The `failureThreshold` is set to `1000000` to allow up to ~11 days before the Pod is marked as failed and wir restart.
+- The `timeoutSeconds` is set to `1000000` to allow up to ~11 days before the Pod is marked as failed and wir restart.
 - If something goes wrong, your monitoring tools will have **plenty of time** to alert you.
 - 1,000,000 seconds ≈ **11 days**, giving you plenty of time to fix things or panic.
 - With 4 startup attempts per failed Pod, you’ve got nearly **1.5 months** before most HSMs lock.  
