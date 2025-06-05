@@ -1,148 +1,87 @@
 package main
 
 import (
-	"bytes"
-	"crypto/tls"
-	"encoding/xml"
-	"flag"
 	"fmt"
-	log "github.com/sirupsen/logrus"
-	"io"
-	"net/http"
 	"os"
+	"os/exec"
+	"strings"
+	"time"
 )
 
-type Member struct {
-	ObjectType    string `xml:"objectType,attr"`
-	XRoadInstance string `xml:"xRoadInstance"`
-	MemberClass   string `xml:"memberClass"`
-	MemberCode    string `xml:"memberCode"`
-}
-
-type ClientList struct {
-	Members []struct {
-		ID   Member `xml:"id"`
-		Name string `xml:"name"`
-	} `xml:"member"`
+func infinitWaiting() {
+	go func() {
+		for {
+			time.Sleep(time.Hour)
+		}
+	}()
+	select {}
 }
 
 func main() {
-	// Флаг для уровня логирования
-	logLevel := flag.String("log-level", "info", "Log level: fatal, error, warn, info")
-	flag.Parse()
 
-	// Применяем уровень логирования
-	level, err := log.ParseLevel(*logLevel)
-	if err != nil {
-		log.Fatalf("Invalid log level: %v \nPossible levels: fatal, error, warn, info ", err)
-		os.Exit(1)
-	}
-	log.SetLevel(level)
-
-	log.Info("Starting healthcheck")
-	// 1. Загрузка TLS ключа и сертификата
-	cert, err := tls.LoadX509KeyPair("/etc/certs/tls.crt", "/etc/certs/tls.key")
-	if err != nil {
-		log.Fatalf("Failed to load cert/key: %v", err)
+	env := os.Getenv("UXP_TOKENS_PASS")
+	if env == "" {
+		fmt.Fprintln(os.Stderr, "UXP_TOKENS_PASS is not set")
 		os.Exit(1)
 	}
 
-	// 2. Настройка TLS клиента
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true,                    // не проверяем self-signed сервер
-		Certificates:       []tls.Certificate{cert}, // клиентский ключ+сертификат
-	}
+	// Разбиваем переменную окружения на пары
+	pairs := strings.Split(env, ",")
 
-	// 1. GET запрос
-	resp, err := http.Get("http://127.0.0.1/listSecurityServerClients")
-	if err != nil {
-		log.Fatalf("Request failed: %v\n", err)
-		os.Exit(1)
-	}
-	log.Infof("Get request handled successful. Got info from http://127.0.0.1/listSecurityServerClients\n")
-	defer resp.Body.Close()
+	healthceck_status := false
 
-	body, _ := io.ReadAll(resp.Body)
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		kv := strings.SplitN(pair, ":", 2)
+		if len(kv) != 2 {
+			fmt.Fprintf(os.Stderr, "Invalid token format: %s\n", pair)
+			os.Exit(1)
+		}
 
-	// 2. Парсинг XML
-	var list ClientList
-	err = xml.Unmarshal(body, &list)
-	if err != nil {
-		log.Fatalf("Invalid XML: %v\n", err)
-		os.Exit(1)
-	}
+		key := strings.TrimSpace(kv[0])
+		value := strings.TrimSpace(kv[1])
 
-	var member Member
-	for _, m := range list.Members {
-		if m.ID.ObjectType == "MEMBER" {
-			member = m.ID
-			break
+		// Вызываем token_login -w
+		fmt.Printf("Start login for token: %s\n", key)
+		err := exec.Command("token_login", "-w", key, value).Run()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "token_login -w failed for %s: %v\n", key, err)
+			infinitWaiting()
+			//os.Exit(1)
+		}
+
+		// Вызываем token_login -r 10 раз
+		fmt.Printf("Start login check for token: %s\n", key)
+		for i := 0; i < 10; i++ {
+			cmd_healthceck := exec.Command("trembita-healthcheck", "--log-level=fatal")
+			cmd_healthceck.Stdout = os.Stdout
+			cmd_healthceck.Stderr = os.Stderr
+			if err := cmd_healthceck.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "trembita-healthcheck failed. Err: %v\n", err)
+				healthceck_status = false
+			} else {
+				fmt.Fprintf(os.Stderr, "trembita-healthcheck succeeded!\n")
+				healthceck_status = true
+			}
+
+			cmd := exec.Command("token_login", "-r", key)
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "token_login -r failed at iteration %d for %s: %v\n", i+1, key, err)
+				infinitWaiting()
+				//os.Exit(1)
+			}
+			time.Sleep(1 * time.Second)
 		}
 	}
 
-	if member.MemberCode == "" {
-		log.Fatal("No MEMBER object found.")
-		os.Exit(1)
-	}
-
-	// 3. Построить SOAP XML
-	soap := fmt.Sprintf(`<?xml version="1.0"?>
-<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
-  xmlns:xroad="http://x-road.eu/xsd/xroad.xsd"
-  xmlns:om="http://x-road.eu/xsd/op-monitoring.xsd"
-  xmlns:id="http://x-road.eu/xsd/identifiers">
-  <SOAP-ENV:Header>
-    <xroad:client id:objectType="MEMBER">
-      <id:xRoadInstance>%s</id:xRoadInstance>
-      <id:memberClass>%s</id:memberClass>
-      <id:memberCode>%s</id:memberCode>
-    </xroad:client>
-    <xroad:service id:objectType="SERVICE">
-      <id:xRoadInstance>%s</id:xRoadInstance>
-      <id:memberClass>%s</id:memberClass>
-      <id:memberCode>%s</id:memberCode>
-      <id:serviceCode>getSecurityServerHealthData</id:serviceCode>
-    </xroad:service>
-    <xroad:id>probe-check</xroad:id>
-    <xroad:protocolVersion>4.0</xroad:protocolVersion>
-  </SOAP-ENV:Header>
-  <SOAP-ENV:Body>
-    <om:getSecurityServerHealthData/>
-  </SOAP-ENV:Body>
-</SOAP-ENV:Envelope>`, member.XRoadInstance, member.MemberClass, member.MemberCode,
-		member.XRoadInstance, member.MemberClass, member.MemberCode)
-
-	// 4. POST SOAP запрос
-	log.Info("Parsing xml from http://127.0.0.1/listSecurityServerClients is OK.\n")
-	log.Info("Sending SOAP request.\n")
-
-	tls_client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-		},
-	}
-
-	req, err := http.NewRequest("POST", "https://127.0.0.1/", bytes.NewBuffer([]byte(soap)))
-	if err != nil {
-		log.Fatalf("Failed to create request: %v\n", err)
-		os.Exit(1)
-	}
-	req.Header.Set("Content-Type", "text/xml")
-
-	resp2, err := tls_client.Do(req)
-	if err != nil {
-		log.Fatalf("SOAP request failed: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp2.Body.Close()
-
-	// 5. Читаем и ищем тег <om:getSecurityServerHealthDataResponse>
-	body2, _ := io.ReadAll(resp2.Body)
-	if bytes.Contains(body2, []byte("getSecurityServerHealthDataResponse")) {
-		log.Info("Proxy is healthy.\n")
-		os.Exit(0)
+	if healthceck_status != true {
+		fmt.Fprintf(os.Stderr, "trembita-healthcheck failed! Pod is not operatable! :( \n")
+		infinitWaiting()
+		//os.Exit(1)
 	} else {
-		log.Fatal("No health response received.\n")
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "trembita-healthcheck succeeded! :) \n")
 	}
+
+	fmt.Println("All tokens processed successfully.")
+	os.Exit(0)
 }
