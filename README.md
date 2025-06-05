@@ -88,7 +88,6 @@ startupProbe:
 - With 4 startup attempts per failed Pod, you’ve got nearly **1.5 months** before most HSMs lock.  
   So take a breath. Enjoy some ☕.
 
-> Bonus: with 4 startup attempts per failure, you have about **1.5 months** before an HSM with a 5-attempt limit is locked out.
 
 ## ✅ Exit Codes
 
