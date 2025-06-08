@@ -24,7 +24,7 @@ Each pair follows the format: `token-id:password`.
   - `user`: login for the HSM cell
   - `pass`: password for that cell
 
-- `ciplus-89-1109442605:12345678`  
+- `ciplus-89-4352562628:3423ddefw23`  
   → A token-password pair for a **Cipher HSM**.
 
 ### 🆔 Where to Find `token-id`?
